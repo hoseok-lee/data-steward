@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-steward"
+version = "0.6.0"
+description = "A command-line catalogue for a lab's datasets: find them, download public data once, link instead of copy"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Ho Seok Lee" }]
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["bioinformatics", "single-cell", "spatial transcriptomics", "data management", "catalogue", "GEO", "SRA"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+[project.optional-dependencies]
+# Read cell counts, organism and tissue from inside .h5ad/.h5mu/.loom/10x .h5 files.
+hdf5 = ["h5py"]
+test = ["pytest", "h5py", "numpy"]
+
+[project.urls]
+Homepage = "https://github.com/hoseok-lee/data-steward"
+Issues = "https://github.com/hoseok-lee/data-steward/issues"
+
+[project.scripts]
+stew = "data_steward.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# A site-specific default catalogue (`root = "..."`), added by site builds; not in the repo.
+data_steward = ["site.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

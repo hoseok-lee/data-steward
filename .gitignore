@@ -1,0 +1,10 @@
+/result*
+__pycache__/
+*.egg-info/
+/build/
+/dist/
+/.venv/
+/.pytest_cache/
+# site-specific default catalogue for local builds
+/site.toml
+/src/data_steward/site.toml
