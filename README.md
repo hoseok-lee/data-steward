@@ -312,4 +312,8 @@ python scripts/make-dummy-data.py /tmp/dummy   # fake tree: real small HDF5 file
                                                # plus mirror/: a typical lab data folder in miniature
 ```
 
+Releases: bump `version` in `pyproject.toml` (and `__init__.py`), add a CHANGELOG entry, then
+create a GitHub release tagged `v<version>`; `.github/workflows/publish.yml` tests, builds and
+uploads it to PyPI.
+
 The flake is pinned to nixpkgs 25.05 so it also evaluates on old Nix releases (2.11).
