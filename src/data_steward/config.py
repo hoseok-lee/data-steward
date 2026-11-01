@@ -14,14 +14,9 @@ stew finds it, in order, from:
 from __future__ import annotations
 
 import os
-import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    tomllib = None
 
 CATALOG_DIR = ".data-steward"
 CATALOG_FILE = "catalog.db"
@@ -74,8 +69,6 @@ class Settings:
 
 
 def _read_toml(path: Path) -> dict:
-    if tomllib is None:
-        raise ConfigError("reading config files needs Python 3.11 or newer")
     try:
         with path.open("rb") as f:
             return tomllib.load(f)

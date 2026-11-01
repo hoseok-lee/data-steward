@@ -42,6 +42,14 @@ where = ["src"]
 # A site-specific default catalogue (`root = "..."`), added by site builds; not in the repo.
 data_steward = ["site.toml"]
 
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# The same rules on every ruff version (newer releases changed the defaults).
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
