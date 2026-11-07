@@ -212,6 +212,78 @@ def head(url: str) -> tuple[int | None, str | None]:
     return (int(size) if size and size.isdigit() else None), (urllib.parse.unquote(m.group(1)) if m else None)
 
 
+def sizes(files: list[RemoteFile]) -> None:
+    """Fills in unknown sizes, asking the server about several files at once."""
+    todo = [f for f in files if f.size is None]
+    if not todo:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(8) as pool:
+        for f, (size, _) in zip(todo, pool.map(lambda f: head(f.url), todo)):
+            f.size = size
+
+
+# --- folder listings (Apache/nginx "Index of" pages, python -m http.server) -------------------------
+
+_INDEX_TITLE = re.compile(r"<(?:title|h1)>\s*(?:Index of|Directory listing for)\b", re.I)
+_HREF = re.compile(r"<a\s[^>]*?href\s*=\s*[\"']([^\"']+)[\"']", re.I)
+MAX_DEPTH = 20
+
+
+def folder_listing(url: str) -> tuple[str, str] | None:
+    """(final URL, page) when `url` is a web server's folder listing, else None.
+    Only an HTML answer is read, so asking about a big file costs nothing."""
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    try:
+        with request(url) as r:
+            if r.headers.get_content_type() != "text/html":
+                return None
+            final = r.geturl()
+            text = r.read(4 << 20).decode("utf-8", "replace")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    if not _INDEX_TITLE.search(text):
+        return None
+    return (final if final.endswith("/") else final + "/"), text
+
+
+def crawl_listing(url: str, text: str | None = None, prefix: str = "", max_depth: int = MAX_DEPTH) -> list[RemoteFile]:
+    """Every file below the folder listing at `url` (down to `max_depth` subfolders),
+    named by its path relative to it (plus `prefix`). Follows only links that lead
+    further down: never the parent folder, sort-order links or other sites."""
+    files: list[RemoteFile] = []
+    seen: set[str] = set()
+
+    def walk(page: str, text: str, rel: str, depth: int):
+        here = urllib.parse.urlsplit(page)
+        for href in _HREF.findall(text):
+            href = html.unescape(href)
+            if href.startswith(("?", "#")) or href.lower().startswith(("mailto:", "javascript:")):
+                continue
+            link = urllib.parse.urlsplit(urllib.parse.urljoin(page, href))
+            if (link.scheme, link.netloc) != (here.scheme, here.netloc) or link.query:
+                continue
+            if not link.path.startswith(here.path) or link.path == here.path:
+                continue  # the parent folder, the site root, or this page itself
+            sub = urllib.parse.unquote(link.path[len(here.path):])
+            full = urllib.parse.urlunsplit((link.scheme, link.netloc, link.path, "", ""))
+            if full in seen:
+                continue
+            seen.add(full)
+            if sub.endswith("/"):
+                if depth < max_depth:
+                    walk(full, get_text(full), rel + sub, depth + 1)
+            else:
+                files.append(RemoteFile(rel + sub, full))
+
+    if not url.endswith("/"):
+        url += "/"
+    walk(url, get_text(url) if text is None else text, prefix, 0)
+    sizes(files)
+    return files
+
+
 def _one(values) -> str | None:
     s = {v for v in values if v}
     return s.pop() if len(s) == 1 else None
@@ -386,10 +458,40 @@ def _attrs(node) -> dict[str, str]:
     return {a.get("name", ""): a.get("value", "") for a in node.get("attributes") or []}
 
 
+BIOSTUDIES = "https://www.ebi.ac.uk/biostudies/api/v1"
+BIOSTUDIES_PAGE = 1000
+
+
+def _biostudies_files(acc: str, base: str) -> list[RemoteFile]:
+    """The study's full file list (BioImage Archive studies keep it here, with
+    paths into subfolders), page by page. Folders in it are read from the listing."""
+    files: list[RemoteFile] = []
+    seen: set[str] = set()  # each file is listed once per section that uses it
+    start = 0
+    while True:
+        page = get_json(f"{BIOSTUDIES}/files/{acc}?" + urllib.parse.urlencode(
+            {"start": start, "length": BIOSTUDIES_PAGE})) or {}
+        rows = page.get("data") or []
+        for x in rows:
+            p = (x.get("path") or x.get("Name") or "").strip("/")
+            if not p or p in seen:
+                continue
+            seen.add(p)
+            url = base + urllib.parse.quote(p)
+            if str(x.get("isDirectory")).lower() == "true" or x.get("type") == "directory":
+                files += crawl_listing(url + "/", prefix=p + "/")
+            else:
+                size = str(x.get("Size") or x.get("size") or "")
+                files.append(RemoteFile(p, url, int(size) if size.isdigit() else None))
+        start += len(rows)
+        if not rows or start >= int(page.get("recordsTotal") or 0):
+            return files
+
+
 def resolve_biostudies(src: Source) -> Remote:
     acc = src.accession
-    info = get_json(f"https://www.ebi.ac.uk/biostudies/api/v1/studies/{acc}/info")
-    study = get_json(f"https://www.ebi.ac.uk/biostudies/api/v1/studies/{acc}")
+    info = get_json(f"{BIOSTUDIES}/studies/{acc}/info")
+    study = get_json(f"{BIOSTUDIES}/studies/{acc}")
     if not info or not study:
         raise SourceError(f"BioStudies/ArrayExpress has no public study {acc}")
     base = info["httpLink"].rstrip("/") + "/Files/"
@@ -401,23 +503,38 @@ def resolve_biostudies(src: Source) -> Remote:
     if "single" in sattrs.get("Study type", "").lower() and "rna" in sattrs.get("Study type", "").lower():
         r.modalities.add("rna")
 
+    found: dict[str, RemoteFile] = {}
+
+    def add(p: str, size=None):
+        p = p.strip("/")
+        if p and p not in found:
+            found[p] = RemoteFile(p, base + urllib.parse.quote(p), size)
+
     def walk(node):
         for f in node.get("files") or []:
             for x in (f if isinstance(f, list) else [f]):
                 p = x.get("path") or x.get("filePath")
                 if p and x.get("type") != "directory":
-                    r.files.append(RemoteFile(p, base + urllib.parse.quote(p), x.get("size")))
+                    add(p, x.get("size"))
         for s in node.get("subsections") or []:
             for x in (s if isinstance(s, list) else [s]):
                 walk(x)
 
     walk(section)
-    if not r.files:  # big studies keep file lists elsewhere; read the folder listing instead
-        for name in re.findall(r'href="([^"?/][^"]*)"', get_text(base)):
-            if not name.endswith("/"):
-                url = base + name
-                size, _ = head(url)
-                r.files.append(RemoteFile(urllib.parse.unquote(name), url, size))
+    # Studies with file lists (BioImage Archive, big ArrayExpress ones) list each file,
+    # also those in subfolders, once per section; the API gives them all with sizes.
+    try:
+        listed = _biostudies_files(acc, base)
+        if listed:  # the file lists themselves (metadata tables) sit at the top, outside the list
+            listed += crawl_listing(base, max_depth=0)
+    except SourceError:
+        listed = []
+    for f in listed:
+        found.setdefault(f.name, f)
+    r.files = list(found.values())
+    if not r.files:  # no usable list: read the folders themselves
+        r.files = crawl_listing(base)
+    sizes(r.files)
     if not r.files:
         r.note = f"{acc} has no downloadable files. Its raw reads may be at ENA (try its ERP/PRJEB accession)."
     return r
@@ -515,6 +632,11 @@ def resolve_hca(src: Source) -> Remote:
 # --- plain URLs -------------------------------------------------------------------------------------
 
 def resolve_url(src: Source) -> Remote:
+    listing = folder_listing(src.url)
+    if listing:  # a web server's folder page: fetch the folder, not the page
+        files = crawl_listing(*listing)
+        note = None if files else f"{listing[0]} is an empty folder."
+        return Remote(files=files, note=note)
     size, name = head(src.url)
     if not name:
         name = urllib.parse.unquote(urllib.parse.urlsplit(src.url).path.rsplit("/", 1)[-1]) or "download"

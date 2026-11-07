@@ -124,22 +124,24 @@ stew download GSM8454446                 # one GEO sample's processed files
 stew download GSE84133 --raw             # its FASTQs, via SRA/ENA
 stew download SRP000001 --files 'SRR000003_*'
 stew download E-MTAB-5061                # ArrayExpress / BioStudies
+stew download S-BIAD1759 --dry-run       # BioImage Archive: files in subfolders too
 stew download cellxgene:6f6d381a-7701-4781-935c-db10d30de293 --files '*core*'
 stew download hca:74b6d569-3b11-42ef-b6b1-a0454522b4a0        # add --raw for FASTQs
 stew download figshare:5968960 --files metadata_droplet.csv
 stew download zenodo:5979761 --organ lung --tag tracking --background
 stew download https://example.org/atlas.h5ad --name my-atlas --derived-from hlca-core
+stew download https://ftp.example.org/data/run1/   # a folder listing: the whole folder
 ```
 
 | source | how stew gets the files |
 |---|---|
 | GEO `GSE…`/`GSM…` | supplementary (processed) files; `--raw` follows GEO's SRA/BioProject link to the FASTQs |
 | SRA/ENA `SRP/SRX/SRR/PRJNA/ERP/PRJEB…` | FASTQs from ENA's mirror, md5-checked (submitted BAMs if there are no FASTQs); runs ENA doesn't mirror come as `.sra` files from NCBI's AWS open-data copy (convert with `fasterq-dump`) |
-| ArrayExpress/BioStudies `E-MTAB-…` | the study's files (processed data, SDRF/IDF); raw reads via their ENA accession |
+| ArrayExpress/BioStudies/BioImage Archive `E-MTAB-…`, `S-BIAD…` | all the study's files, including those in subfolders (kept as subfolders), from the BioStudies file list; raw reads via their ENA accession |
 | CELLxGENE `cellxgene:<collection>` | one H5AD per dataset in the collection |
 | HCA `hca:<project>` | processed files (matrices, loom, h5ad); `--raw` for FASTQs; sha256-checked |
 | figshare, Zenodo | all files of the record, md5-checked |
-| any URL | the one file |
+| any URL | the one file; for a web server's folder listing ("Index of …"), every file below that folder, keeping its subfolders |
 
 Before fetching anything, `download` checks that the data isn't already here:
 

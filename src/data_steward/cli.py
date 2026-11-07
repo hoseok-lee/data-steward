@@ -178,11 +178,11 @@ DOWNLOAD_EPILOG = """\
 SOURCE can be:
   GEO series or sample      GSE274673, GSM8454446 (add --raw for the reads on SRA)
   SRA / ENA reads           SRP…, SRX…, SRR…, PRJNA…, ERP…, PRJEB…
-  ArrayExpress / BioStudies E-MTAB-5061
+  ArrayExpress / BioStudies E-MTAB-5061, S-BIAD1759 (BioImage Archive)
   CELLxGENE collection      cellxgene:<id> or its cellxgene.cziscience.com URL
   Human Cell Atlas project  hca:<id> or its data.humancellatlas.org URL (--raw for FASTQs)
   figshare / Zenodo         figshare:123, zenodo:123, their DOIs or URLs
-  anything else             an http(s)/ftp URL
+  anything else             an http(s)/ftp URL; a folder listing URL downloads the folder
 
 Before downloading anything, stew checks that the data is not already here:
   1. a catalogued dataset already has this source (or the GEO series / Zenodo
