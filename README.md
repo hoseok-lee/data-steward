@@ -57,6 +57,11 @@ folder_mode = "3775"        # group-writable, inherited group, only owners delet
 public = "public/{kind}/{accession}"   # with a source, e.g. public/geo/GSE123456
 reference = "references/{ref_kind}"    # genomes and annotations: 10x or annotations
 project = "projects"                   # everything else
+
+[download]                  # optional; these are the defaults
+connections = 8             # connections per large file
+jobs = 3                    # files downloaded at once
+max_connections = 16        # connections altogether
 ```
 
 stew finds the catalogue, in order, from: `--catalog`; `$STEW_ROOT` (or
@@ -165,6 +170,17 @@ and free space is checked first. Finished downloads are registered with their
 source, title and study, the files are read for cell counts, organism and tissue,
 and recognisable datasets inside a download (e.g. each H5AD of a CELLxGENE
 collection) are registered too, as `part-of` the download.
+
+Large files (64 MiB and up) on servers that accept ranged requests (Zenodo, EBI,
+most HTTP servers) are fetched over 8 connections at once, each writing its own
+part of the file; a dataset's files are fetched 3 at a time, with at most 16
+connections altogether. Change this with `--connections N` and `--jobs N` (or the
+`[download]` settings); `--connections 1` fetches each file over one connection.
+An interrupted download keeps a `<file>.part.json` beside `<file>.part` listing
+what is still missing, and resumes each part where it stopped; a `.part` from an
+older stew is resumed too. Servers without ranged requests, files of unknown size
+and signed URLs (HCA) use one connection. When a server answers "busy" (429/503),
+stew waits as long as it asks and uses fewer connections for that file.
 
 With `--background`, stew does the checks and asks its questions, then hands the
 download to a tmux session (`stew-dl-…`) and returns. `stew downloads` shows

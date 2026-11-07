@@ -19,12 +19,22 @@ from pathlib import Path
 from . import __version__, checksum, config, contents, detect, provenance, sources, util, vocab
 from .db import Catalog, CatalogError, Changes, Filter
 from .detect import Candidate
-from .fetch import FetchError, check_space, fetch
+from .fetch import FetchError, check_space, fetch_many, pending_bytes
 from .util import Presence, human_size
 
 
 class UserError(Exception):
     pass
+
+
+def positive(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be a whole number of at least 1, not {text!r}")
+    return n
 
 
 # --- help text --------------------------------------------------------------------------
@@ -193,7 +203,15 @@ Before downloading anything, stew checks that the data is not already here:
   4. the destination folder already exists without being a stew download.
 Check 1 and 3 always stop the download. Checks 2 and 4 can be overridden with --force.
 
-Interrupted downloads resume when you re-run the same command. Published checksums
+Large files (64 MiB and up) are fetched over several connections at once when the
+server allows it (--connections, default 8), and up to 3 files at a time (--jobs),
+at most 16 connections altogether; set the defaults in config.toml under
+[download] (connections, jobs, max_connections). --connections 1 uses one
+connection per file. A server that answers "busy" (429/503) is waited for, as long
+as it asks, and given fewer connections.
+
+Interrupted downloads resume when you re-run the same command, each part where it
+stopped (`<file>.part` and `<file>.part.json`). Published checksums
 (md5 or sha256) are verified. Finished downloads are registered with their source,
 and the files are read for cell counts, organism and tissue. With --background the
 download runs in a tmux session; `stew downloads` shows progress and stew tells
@@ -205,7 +223,8 @@ Examples:
   stew download GSE123456 --raw --background   the FASTQs from SRA, in the background
   stew download cellxgene:6f6d381a-7701-4781-935c-db10d30de293 --files '*core*'
   stew download zenodo:5979761 --organ lung --tag tracking
-  stew download https://example.org/atlas.h5ad --name my-atlas"""
+  stew download https://example.org/atlas.h5ad --name my-atlas
+  stew download S-BIAD1759 --jobs 2 --connections 6 --background"""
 
 
 class Parser(argparse.ArgumentParser):
@@ -383,6 +402,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="run the checks and show the plan; download nothing")
     p.add_argument("--force", action="store_true",
                    help="download even if a dataset merely mentions the accession, or the folder exists")
+    p.add_argument("--connections", type=positive, metavar="N",
+                   help="connections per large file (default 8; 1 = one stream, as before 0.7)")
+    p.add_argument("--jobs", type=positive, metavar="N",
+                   help="files downloaded at once (default 3); at most 16 connections altogether")
     _meta_args(p, source=False)
 
     p = cmd("downloads", "Downloads in progress, finished and failed")
@@ -1629,6 +1652,7 @@ def cmd_config(a, ui):
           + ("" if (path.parent / config.CONFIG_FILE).is_file() else "   (none: defaults)"))
     print(f"move_on_add {str(s.move_on_add).lower()}")
     print(f"group       {s.group or '-'}   folder_mode {oct(s.folder_mode)[2:]}")
+    print("download    " + "   ".join(f"{k} {v}" for k, v in s.download.items()))
     for k, v in s.layout.items():
         print(f"layout      {k:<10} {v}")
     return 0 if path.exists() else 1
@@ -1810,7 +1834,8 @@ def cmd_downloads(a, ui, cat):
     for d in cat.downloads(limit=a.limit):
         status = d["status"]
         if status == "running" and d["total_bytes"]:
-            done = util.disk_usage(Path(d["dest"]))[0] if Path(d["dest"]).exists() else 0
+            dest = Path(d["dest"])
+            done = util.disk_usage(dest)[0] - pending_bytes(dest) if dest.exists() else 0
             status = f"running {min(100, 100 * done / d['total_bytes']):.0f}%"
         out.append([str(d["id"]), d["source"], d["user"], status, d["started_at"], d["finished_at"], d["dest"],
                     d["log"] or ""])
@@ -2116,10 +2141,9 @@ def cmd_download(a, ui, cat):
         shared_dirs(cat, dest.parent)
         dest.mkdir(exist_ok=True)
         marker.write_text(src.key + "\n")
-        for i, f in enumerate(files, 1):
-            if len(files) > 1:
-                print(f"[{i}/{len(files)}] {f.name}", flush=True)
-            fetch(f, dest)
+        dl_conf = settings(cat).download
+        fetch_many(files, dest, jobs=a.jobs or dl_conf["jobs"], connections=a.connections or dl_conf["connections"],
+                   max_connections=dl_conf["max_connections"])
     except (FetchError, OSError, KeyboardInterrupt) as e:
         cat.finish_download(dl, "failed", detail=str(e) or type(e).__name__)
         if isinstance(e, KeyboardInterrupt):

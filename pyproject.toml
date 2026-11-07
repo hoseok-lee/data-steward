@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "data-steward"
-version = "0.6.1"
+version = "0.7.0"
 description = "A command-line catalogue for a lab's datasets: find them, download public data once, link instead of copy"
 readme = "README.md"
 license = { text = "MIT" }

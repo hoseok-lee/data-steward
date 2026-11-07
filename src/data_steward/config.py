@@ -31,6 +31,9 @@ DEFAULT_LAYOUT = {
     "project": "projects",                   # everything else
 }
 
+# `stew download`: connections per file, files fetched at once, connections altogether.
+DEFAULT_DOWNLOAD = {"connections": 8, "jobs": 3, "max_connections": 16}
+
 CONFIG_TEMPLATE = '''\
 # data-steward configuration for this data folder. All keys are optional.
 
@@ -50,6 +53,12 @@ folder_mode = "3775"
 public = "{public}"
 reference = "{reference}"
 project = "{project}"
+
+# `stew download`: connections per file, files at once, and connections altogether.
+# [download]
+# connections = 8
+# jobs = 3
+# max_connections = 16
 '''
 
 
@@ -66,6 +75,7 @@ class Settings:
     group: str | None = None
     folder_mode: int = 0o3775
     layout: dict = field(default_factory=lambda: dict(DEFAULT_LAYOUT))
+    download: dict = field(default_factory=lambda: dict(DEFAULT_DOWNLOAD))
 
 
 def _read_toml(path: Path) -> dict:
@@ -152,6 +162,13 @@ def load(catalog: Path, found: str = "") -> Settings:
             raise ConfigError(f"{path}: unknown [layout] keys {', '.join(sorted(unknown))} "
                               f"(known: {', '.join(DEFAULT_LAYOUT)})")
         s.layout.update({k: str(v).strip("/") for k, v in layout.items()})
+        download = d.get("download") or {}
+        for k, v in download.items():
+            if k not in DEFAULT_DOWNLOAD:
+                raise ConfigError(f"{path}: unknown [download] key {k} (known: {', '.join(DEFAULT_DOWNLOAD)})")
+            if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+                raise ConfigError(f"{path}: [download] {k} must be a whole number of at least 1")
+            s.download[k] = v
     return s
 
 
