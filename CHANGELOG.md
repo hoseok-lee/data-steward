@@ -4,7 +4,7 @@
 - `stew download` of a BioStudies / BioImage Archive study (e.g. `S-BIAD1759`) now gets
   every file, including those in subfolders, from the BioStudies file list (paths and
   sizes kept); before, only the top-level metadata files were found. Studies without a
-  file list are read folder by folder.
+  file list are read folder by folder. BioImage Archive titles are picked up.
 - `stew download <url>` of a web server's folder listing ("Index of …") downloads the
   folder's files, subfolders included, instead of saving the listing page. Links to the
   parent folder, sort orders and other sites are not followed.

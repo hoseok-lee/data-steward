@@ -35,8 +35,8 @@ def ebi(monkeypatch):
     """BioStudies' API and file server, answering from the dictionaries above."""
     api = {
         "studies/S-BIAD1/info": {"httpLink": BASE.removesuffix("Files/")},
-        "studies/S-BIAD1": {"attributes": [{"name": "Title", "value": "Tumour profiler"}], "section": {
-            "attributes": [{"name": "Study type", "value": "imaging"}],
+        "studies/S-BIAD1": {"attributes": [{"name": "DOI", "value": "10.6019/S-BIAD1"}], "section": {
+            "attributes": [{"name": "Title", "value": "Tumour profiler"}, {"name": "Study type", "value": "imaging"}],
             "subsections": [{"type": "Study Component",
                              "attributes": [{"name": "File List", "value": "Tumor_metadata.json"}]}]}},
         "files": [  # each file once per section that uses it, one folder, served two rows a page
@@ -74,6 +74,7 @@ def ebi(monkeypatch):
 def test_biostudies_lists_files_in_subfolders(ebi):
     api, calls = ebi
     r = sources.resolve(sources.parse("S-BIAD1"))
+    assert r.title == "Tumour profiler"
     assert {f.name: f.size for f in r.files} == {
         "Tumor/DMG/a 1.ims": 5_000_000_000, "Tumor/DMG/b.ims": 7_000_000_000, "Tumor/extra/c.ims": 100,
         "Tumor_metadata.json": 100, "Tumor_metadata.tsv": 100}

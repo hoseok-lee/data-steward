@@ -495,9 +495,9 @@ def resolve_biostudies(src: Source) -> Remote:
     if not info or not study:
         raise SourceError(f"BioStudies/ArrayExpress has no public study {acc}")
     base = info["httpLink"].rstrip("/") + "/Files/"
-    r = Remote(title=_attrs(study).get("Title"), study=acc)
     section = study.get("section") or {}
     sattrs = _attrs(section)
+    r = Remote(title=_attrs(study).get("Title") or sattrs.get("Title"), study=acc)  # BioImage Archive: in the section
     r.species = vocab.species(sattrs["Organism"]) if sattrs.get("Organism") else None
     r.modalities = _strategy_modalities([sattrs.get("Study type", "")])
     if "single" in sattrs.get("Study type", "").lower() and "rna" in sattrs.get("Study type", "").lower():
