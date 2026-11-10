@@ -2127,7 +2127,10 @@ def download_missing(a, ui, cat, src: sources.Source):
 
     dl = cat.start_download(d["source_key"], src.display, dest, not_running)
     log = os.environ.get("STEW_BACKGROUND_LOG")
-    cat.set_download_meta(dl, bool(log), log, total or None)
+    # `stew downloads` measures the whole folder, which already holds the other files
+    partial = [dest / f"{f.name}{ext}" for f in missing for ext in (".part", ".part.json")]
+    have = util.disk_usage(dest)[0] - sum(p.stat().st_size for p in partial if p.is_file())
+    cat.set_download_meta(dl, bool(log), log, have + total if total else None)
     old_umask = os.umask(0o002)
     try:
         dl_conf = settings(cat).download

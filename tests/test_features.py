@@ -429,7 +429,9 @@ def test_download_missing_tops_up_a_catalogued_record(lab, tmp_path, monkeypatch
     assert after["id"] == d["id"] and after["path"] == d["path"] and after["description"] == "Tiles"
     assert (after["n_files"], after["size_bytes"]) == (3, 60)
     assert (Path(d["path"]) / "c.zip").read_bytes() == b"c" * 30
-    assert cat.downloads()[0]["status"] == "done" and cat.downloads()[0]["dataset_id"] == d["id"]
+    last = cat.downloads()[0]
+    assert last["status"] == "done" and last["dataset_id"] == d["id"]
+    assert last["total_bytes"] == 60  # the folder's files, so progress isn't 100% from the start
 
 
 def test_download_missing_refuses_uncatalogued_or_changed_files(lab, tmp_path, monkeypatch, capsys):
