@@ -394,3 +394,51 @@ def test_relate_suggest(lab, tmp_path, capsys):
     capsys.readouterr()
     stew(lab, "relate", "--suggest")
     assert "No new relations" in capsys.readouterr().out
+
+
+def test_download_missing_tops_up_a_catalogued_record(lab, tmp_path, monkeypatch, capsys):
+    served = tmp_path / "served"
+    for n, body in (("a.zip", b"a" * 10), ("b.zip", b"b" * 20), ("c.zip", b"c" * 30)):
+        touch(served / n, body)
+    server = Server(served)
+    monkeypatch.setitem(sources.RESOLVERS, "zenodo", lambda src: sources.Remote(
+        title="Tiles", files=[sources.RemoteFile(n, f"{server.url}/{n}", s)
+                              for n, s in (("a.zip", 10), ("b.zip", 20), ("c.zip", 30))]))
+    try:
+        assert stew(lab, "download", "zenodo:88", "--files", "a.zip", "--files", "b.zip", "--yes") == 0
+        cat = Catalog.open(lab)
+        d = cat.find("zenodo-88")
+        assert d["n_files"] == 2
+        capsys.readouterr()
+        assert stew(lab, "download", "zenodo:88", "--yes") == 1          # still refused without --missing
+        assert "already downloaded" in capsys.readouterr().err
+        assert stew(lab, "download", "zenodo:88", "--missing", "--name", "x", "--yes") == 1
+        assert "leave out --name" in capsys.readouterr().err
+        assert stew(lab, "download", "zenodo:88", "--missing", "--dry-run") == 0
+        out = capsys.readouterr().out
+        assert "c.zip" in out and "a.zip" not in out.split("missing:")[1]
+        assert not (Path(d["path"]) / "c.zip").exists()
+        assert stew(lab, "download", "zenodo:88", "--missing", "--yes") == 0
+        assert "Added 1 file(s)" in capsys.readouterr().out
+        assert stew(lab, "download", "zenodo:88", "--missing", "--yes") == 0
+        assert "Nothing to add" in capsys.readouterr().out
+    finally:
+        server.httpd.shutdown()
+    cat = Catalog.open(lab)
+    after = cat.find("zenodo-88")
+    assert after["id"] == d["id"] and after["path"] == d["path"] and after["description"] == "Tiles"
+    assert (after["n_files"], after["size_bytes"]) == (3, 60)
+    assert (Path(d["path"]) / "c.zip").read_bytes() == b"c" * 30
+    assert cat.downloads()[0]["status"] == "done" and cat.downloads()[0]["dataset_id"] == d["id"]
+
+
+def test_download_missing_refuses_uncatalogued_or_changed_files(lab, tmp_path, monkeypatch, capsys):
+    monkeypatch.setitem(sources.RESOLVERS, "zenodo", lambda src: sources.Remote(
+        files=[sources.RemoteFile("a.zip", "https://x/a.zip", 99)]))
+    assert stew(lab, "download", "zenodo:89", "--missing", "--yes") == 1
+    assert "isn't catalogued yet" in capsys.readouterr().err
+    folder = touch(tmp_path / "data/public/zenodo/89/a.zip", b"short").parent
+    Catalog.open(lab).insert({"name": "z89", "path": str(folder), "source": "zenodo:89", "source_key": "zenodo:89",
+                              "modalities": []})
+    assert stew(lab, "download", "zenodo:89", "--missing", "--yes") == 1
+    assert "differ in size" in capsys.readouterr().err

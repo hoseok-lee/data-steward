@@ -203,6 +203,10 @@ Before downloading anything, stew checks that the data is not already here:
   4. the destination folder already exists without being a stew download.
 Check 1 and 3 always stop the download. Checks 2 and 4 can be overridden with --force.
 
+To add files that a catalogued record has gained (or that were left out with
+--files), run the same source again with --missing: stew fetches only the files
+not yet in the dataset's folder, into that folder, and updates its size.
+
 Large files (64 MiB and up) are fetched over several connections at once when the
 server allows it (--connections, default 8), and up to 3 files at a time (--jobs),
 at most 16 connections altogether; set the defaults in config.toml under
@@ -223,6 +227,7 @@ Examples:
   stew download GSE123456 --raw --background   the FASTQs from SRA, in the background
   stew download cellxgene:6f6d381a-7701-4781-935c-db10d30de293 --files '*core*'
   stew download zenodo:5979761 --organ lung --tag tracking
+  stew download zenodo:5979761 --missing --files '*.zip'   add files left out before
   stew download https://example.org/atlas.h5ad --name my-atlas
   stew download S-BIAD1759 --jobs 2 --connections 6 --background"""
 
@@ -402,6 +407,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="run the checks and show the plan; download nothing")
     p.add_argument("--force", action="store_true",
                    help="download even if a dataset merely mentions the accession, or the folder exists")
+    p.add_argument("--missing", action="store_true",
+                   help="the source is catalogued already: fetch only its files not yet in the dataset's "
+                        "folder, into that folder")
     p.add_argument("--connections", type=positive, metavar="N",
                    help="connections per large file (default 8; 1 = one stream, as before 0.7)")
     p.add_argument("--jobs", type=positive, metavar="N",
@@ -2038,11 +2046,119 @@ def start_background(a, cat: Catalog, src: sources.Source, c: Candidate, dest: P
           "`stew downloads` shows progress; stew will tell you when it has finished.")
 
 
+def download_missing(a, ui, cat, src: sources.Source):
+    """`download --missing`: tops up the catalogued dataset holding this source
+    (or the record containing it) with the remote files its folder lacks."""
+    given = [f"--{f.replace('_', '-')}" for f in ("name", "to", "organ", "species", "platform", "study",
+                                                  "description", "steward", "derived_from") if getattr(a, f)]
+    if given or a.modalities or a.tags:
+        raise UserError("--missing adds files to an existing dataset and keeps its folder and description; "
+                        "leave out " + ", ".join(given + ["-m"] * bool(a.modalities) + ["--tag"] * bool(a.tags))
+                        + " and change those with `stew set`.")
+    held = cat.by_source([src.key]) or cat.by_source([k for k in src.related if k != src.key])
+    if not held:
+        raise UserError(f"{src.display} isn't catalogued yet; download it without --missing.")
+    if len(held) > 1:
+        raise UserError(f"{src.display} is catalogued more than once; --missing doesn't know which to top up:\n"
+                        f"{describe(held)}")
+    d = held[0]
+    dest = Path(d["path"])
+    if not dest.is_dir():
+        raise UserError(f"#{d['id']} {d['name']} isn't a folder ({dest}), so there is nothing to add files to.")
+    keys = list(dict.fromkeys([d["source_key"], src.key]))
+
+    def not_running():
+        for key in keys:
+            for r in cat.active_downloads(key):
+                raise UserError(f"{r['user']} has been downloading {r['source']} into {r['dest']} since "
+                                f"{r['started_at']}. Wait for it to finish (see `stew downloads`).")
+    not_running()
+
+    print(f"Looking up {src.display} ...")
+    try:
+        remote = sources.resolve(src)
+    except sources.SourceError as e:
+        raise UserError(str(e))
+    if remote.note and not remote.files:
+        raise UserError(remote.note)
+    files = remote.files
+    if a.files:
+        import fnmatch
+        files = [f for f in files if any(fnmatch.fnmatch(f.name, p) for p in a.files)]
+        if not files:
+            raise UserError("no files match " + ", ".join(a.files) + ". Available: "
+                            + ", ".join(f.name for f in remote.files[:20]) + (" ..." if len(remote.files) > 20 else ""))
+    missing, differ = [], []
+    for f in files:
+        here = dest / f.name
+        if not here.exists():
+            missing.append(f)
+        elif f.size is not None and here.is_file() and here.stat().st_size != f.size:
+            differ.append(f"{f.name} ({human_size(here.stat().st_size)} here, {human_size(f.size)} remote)")
+    if differ:
+        raise UserError(f"these files in {dest} differ in size from {src.display}, so stew won't touch them:\n  "
+                        + "\n  ".join(differ) + "\nMove them aside first if they should be replaced.")
+    if not missing:
+        print(f"Nothing to add: all {len(files)} file(s) of {src.display} are in #{d['id']} {d['name']} ({dest}).")
+        return
+
+    total = sum(f.size or 0 for f in missing)
+    print(f"\n{src.display}: {len(files) - len(missing)} of {len(files)} file(s) already in #{d['id']} {d['name']}; "
+          "missing:")
+    table(["FILE", "SIZE"], [[f.name, human_size(f.size)] for f in missing[:30]])
+    if len(missing) > 30:
+        print(f"... and {len(missing) - 30} more")
+    print(f"\n{len(missing)} file(s), {human_size(total)} -> {dest}")
+    if a.dry_run:
+        print("\nDry run: nothing downloaded.")
+        return
+    try:
+        check_space(dest, total)
+    except FetchError as e:
+        raise UserError(str(e))
+    if ui.interactive:
+        if not ui.confirm(f"Add them to {d['name']}?", True):
+            return
+    elif not ui.yes:
+        raise UserError("not running in a terminal; re-run with --yes to download")
+    if a.background:
+        start_background(a, cat, src, argparse.Namespace(name=None, organ=None, species=None, modalities=set()), dest)
+        return
+
+    dl = cat.start_download(d["source_key"], src.display, dest, not_running)
+    log = os.environ.get("STEW_BACKGROUND_LOG")
+    cat.set_download_meta(dl, bool(log), log, total or None)
+    old_umask = os.umask(0o002)
+    try:
+        dl_conf = settings(cat).download
+        fetch_many(missing, dest, jobs=a.jobs or dl_conf["jobs"], connections=a.connections or dl_conf["connections"],
+                   max_connections=dl_conf["max_connections"])
+    except (FetchError, OSError, KeyboardInterrupt) as e:
+        cat.finish_download(dl, "failed", detail=str(e) or type(e).__name__)
+        if isinstance(e, KeyboardInterrupt):
+            raise UserError("interrupted; run the same command again to resume")
+        raise UserError(f"download failed: {e}\nRun the same command again to resume.")
+    finally:
+        os.umask(old_umask)
+
+    size, n = util.disk_usage(dest)
+    with cat.tx():
+        cat.update_stats(d["id"], util.owner_of(dest), size, n)
+        cat.log("download", d["name"], f"added {len(missing)} missing file(s) of {src.display}")
+    cat.finish_download(dl, "done", d["id"], f"{len(missing)} missing file(s) added")
+    print(f"\nAdded {len(missing)} file(s) to #{d['id']} {d['name']}: now {human_size(size)} in {n} file(s) "
+          f"at {dest}")
+    if d["fingerprint"]:
+        print(f"Its checksum predates these files: run `stew checksum {d['name']}` to update it.")
+
+
 def cmd_download(a, ui, cat):
     try:
         src = sources.parse(a.source, raw=a.raw)
     except sources.SourceError as e:
         raise UserError(str(e))
+    if a.missing:
+        return download_missing(a, ui, cat, src)
     meta = Meta(a)
     if meta.derived_from:
         cat.find(meta.derived_from)

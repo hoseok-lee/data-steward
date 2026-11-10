@@ -134,6 +134,7 @@ stew download cellxgene:6f6d381a-7701-4781-935c-db10d30de293 --files '*core*'
 stew download hca:74b6d569-3b11-42ef-b6b1-a0454522b4a0        # add --raw for FASTQs
 stew download figshare:5968960 --files metadata_droplet.csv
 stew download zenodo:5979761 --organ lung --tag tracking --background
+stew download zenodo:5979761 --missing    # add the record's files not yet in its folder
 stew download https://example.org/atlas.h5ad --name my-atlas --derived-from hlca-core
 stew download https://ftp.example.org/data/run1/   # a folder listing: the whole folder
 ```
@@ -158,6 +159,12 @@ Before fetching anything, `download` checks that the data isn't already here:
    recorded;
 3. someone is downloading it right now;
 4. the destination folder already exists without being a stew download.
+
+To top up a catalogued record (files left out with `--files`, or added to the record
+later), use `--missing`: stew fetches only the files not yet in the dataset's folder,
+into that folder, and updates the dataset's size; its name, description and other
+metadata stay as they were. Files that are there with a different size are left
+alone and reported.
 
 Checks 1 and 3 always stop the download; 2 and 4 can be overridden with `--force`.
 The first round of checks uses only the catalogue and the disk, so a repeat

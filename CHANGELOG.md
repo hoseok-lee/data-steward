@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1
+- `stew download <source> --missing` tops up a catalogued dataset with the remote files
+  its folder lacks (e.g. ones left out with `--files`), into the same folder, and
+  updates the dataset's size and file count. It works with `--files`, `--dry-run` and
+  `--background`, and leaves files that are there with a different size alone (and
+  says so). Without `--missing`, a catalogued source is still refused.
+
 ## 0.7.0
 - `stew download` fetches large files (64 MiB and up) over several connections at once
   when the server accepts ranged requests: 8 per file by default (`--connections N`;
