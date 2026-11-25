@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 - `stew download syn…` downloads from Synapse: every file of a project or folder
   (subfolders kept), a single file, or the files of a dataset; `syn123.4` pins a
   version, and synapse.org URLs work too. Files are md5-checked, and species, organ and

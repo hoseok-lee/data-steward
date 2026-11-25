@@ -87,7 +87,9 @@ stew download GSE123456 --dry-run         # says "already here", or lists what i
 ```
 
 GEO (`--raw` for the reads), SRA/ENA, ArrayExpress, CELLxGENE, the Human Cell Atlas,
-figshare and Zenodo accessions or plain URLs all work. Then ask the steward to run it.
+figshare, Zenodo and Synapse (`syn…`) accessions or plain URLs all work. Then ask the
+steward to run it. Synapse downloads use the token of whoever runs them, from their
+`~/.synapseConfig` (see the README), and need the data's terms of use accepted with that account.
 
 ## Good to know
 
