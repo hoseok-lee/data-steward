@@ -327,7 +327,10 @@ def _fetch_single(f: RemoteFile, part: Path, board: Board, stop: threading.Event
             except urllib.error.HTTPError as e:
                 if e.code == 416 and have:  # nothing left to fetch
                     break
-                _http_error(e, f.url)
+                if e.code == 403 and f.resolve:  # a signed URL refused or expired: ask for a fresh one soon
+                    wait = failures + 1
+                else:
+                    _http_error(e, f.url)
                 err = f"{e.code} {e.reason}"
                 if e.code in (429, 503):
                     busy += 1
@@ -338,11 +341,11 @@ def _fetch_single(f: RemoteFile, part: Path, board: Board, stop: threading.Event
                 err = str(getattr(e, "reason", e)) or type(e).__name__
             else:
                 err = "connection closed early"
-            if wait is None:
+            if wait is None or err.startswith("403"):
                 failures += 1
                 if failures >= RETRIES:
                     raise FetchError(f"{f.name}: {err}; giving up after {RETRIES} tries (re-run to resume)")
-                wait = 5 * failures
+                wait = wait or 5 * failures
             board.say(f"  {f.name}: {err}; retrying in {wait}s")
             if stop.wait(wait):
                 break

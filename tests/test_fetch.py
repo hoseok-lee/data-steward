@@ -36,6 +36,7 @@ class RangeServer:
         self.files, self.ranges = files, ranges
         self.log = []          # (path, Range header or None, status)
         self.busy = 0          # answer this many ranged requests (not the 1-byte probe) with 429
+        self.forbid = 0        # answer this many requests with 403 (a refused signed URL)
         self.cut_after = None  # stop each response after this many bytes
         self.delay = 0.0       # pause between 4 KiB pieces
         self.active = self.max_active = 0
@@ -58,6 +59,11 @@ class RangeServer:
                 rng = self.headers.get("Range")
                 if data is None:
                     return self.status(path, rng, 404)
+                with outer.lock:
+                    forbid = outer.forbid > 0
+                    outer.forbid -= forbid
+                if forbid:
+                    return self.status(path, rng, 403)
                 start, end, code = 0, len(data) - 1, 200
                 m = re.fullmatch(r"bytes=(\d+)-(\d*)", rng or "")
                 if m and outer.ranges:
@@ -222,6 +228,17 @@ def test_signed_urls_and_small_or_unsized_files_use_one_connection(server, tmp_p
     unsized = sources.RemoteFile("big.bin", f"{server.url}/big.bin")
     assert fetch(unsized, tmp_path / "b", connections=8).read_bytes() == server.files["big.bin"]
     assert all(rng is None for _, rng, _ in server.log)
+
+
+def test_refused_signed_url_is_asked_for_again(server, tmp_path):
+    asked = []
+    f = server.remote("other.bin", resolve=lambda: asked.append(1) or f"{server.url}/other.bin")  # e.g. Synapse
+    server.forbid = 2
+    assert fetch(f, tmp_path / "a").read_bytes() == server.files["other.bin"]
+    assert len(asked) == 3
+    server.forbid = 1  # a plain URL that says 403 means it
+    with pytest.raises(FetchError, match="403"):
+        fetch(server.remote("other.bin"), tmp_path / "b", connections=1)
 
 
 def test_busy_server_slows_down_instead_of_failing(server, tmp_path, capsys):

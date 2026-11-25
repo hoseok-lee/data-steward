@@ -8,6 +8,8 @@
   from `~/.synapseConfig` or `$SYNAPSE_AUTH_TOKEN`, like the synapse client does; without
   one, only open data downloads. Files whose terms of use you haven't accepted are left
   out, with a note saying where to accept them.
+- A signed download URL (Synapse, HCA) that answers 403 is asked for again and retried a few
+  times, instead of failing the file at once.
 ## 0.7.1
 - `stew download <source> --missing` tops up a catalogued dataset with the remote files
   its folder lacks (e.g. ones left out with `--files`), into the same folder, and
