@@ -1,5 +1,5 @@
 """Where datasets come from: GEO, SRA/ENA, CELLxGENE, ArrayExpress/BioStudies,
-figshare, Zenodo, the Human Cell Atlas, and plain URLs.
+figshare, Zenodo, the Human Cell Atlas, Synapse, and plain URLs.
 
 `parse` turns what someone typed into a canonical key without touching the
 network, so the "already downloaded?" check can run first. `resolve` then asks
@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -25,7 +27,7 @@ RAW_KINDS = ("geo", "hca")  # sources that have both processed files and raw rea
 
 KINDS_HELP = ("a GEO accession (GSE…/GSM…), an SRA/ENA accession (SRP…, SRR…, PRJNA…, ERP…), "
               "an ArrayExpress/BioStudies accession (E-MTAB-…), cellxgene:<collection id>, "
-              "hca:<project id>, figshare:<id>, zenodo:<id>, or an http(s)/ftp URL")
+              "hca:<project id>, figshare:<id>, zenodo:<id>, a Synapse ID (syn…), or an http(s)/ftp URL")
 
 
 class SourceError(ValueError):
@@ -34,7 +36,7 @@ class SourceError(ValueError):
 
 @dataclass
 class Source:
-    kind: str                 # geo, sra, cellxgene, biostudies, figshare, zenodo, hca or url
+    kind: str                 # geo, sra, cellxgene, biostudies, figshare, zenodo, hca, synapse or url
     key: str                  # canonical identity, e.g. geo:GSE123, zenodo:456, url:https://...
     display: str              # what is stored and shown: GSE123, zenodo:456, the URL
     accession: str | None = None
@@ -55,6 +57,8 @@ class Source:
             return []
         if self.kind in ("zenodo", "figshare"):
             return [f"{self.kind}{sep}{a}" for sep in ("", ".", "-", "_", ":")]
+        if self.kind == "synapse":
+            return [a.split(".")[0]]  # syn123.4 is a version of syn123
         return [a]
 
 
@@ -62,7 +66,7 @@ def _make(kind: str, acc: str, raw: bool = False) -> Source:
     if raw and kind not in RAW_KINDS + ("sra",):
         raise SourceError(f"--raw only applies to GEO and HCA (and SRA is always raw reads), not {kind}")
     raw = raw and kind in RAW_KINDS
-    display = acc if kind in ("geo", "sra", "biostudies") else f"{kind}:{acc}"
+    display = acc if kind in ("geo", "sra", "biostudies", "synapse") else f"{kind}:{acc}"
     if raw:
         display += ":raw"
     return Source(kind, f"{kind}:{acc}" + (":raw" if raw else ""), display, accession=acc, raw=raw)
@@ -77,7 +81,10 @@ _PATTERNS = (
                             re.I), str),
     ("cellxgene", re.compile(rf"^cellxgene:({UUID})$", re.I), str.lower),
     ("hca", re.compile(rf"^hca:({UUID})$", re.I), str.lower),
+    ("synapse", re.compile(r"^(?:synapse:)?(syn\d+(?:\.\d+)?)$", re.I), str.lower),
 )
+# synapse.org pages put the ID in the fragment (#!Synapse:syn123), which normalize_url drops.
+_SYNAPSE_URL = re.compile(r"^https?://(?:www\.)?synapse\.org/.*?\bSynapse:(syn\d+(?:\.\d+)?)\b", re.I)
 
 
 def normalize_url(url: str) -> str:
@@ -147,6 +154,9 @@ def parse(text: str, raw: bool = False) -> Source:
         m = pat.match(s)
         if m:
             return _make(kind, norm(m.group(1)), raw)
+    m = _SYNAPSE_URL.match(s)
+    if m:
+        return _make("synapse", m.group(1).lower(), raw)
     if not re.match(r"^(https?|ftp)://", s, re.I):
         raise SourceError(f"'{text}' is not {KINDS_HELP}")
     return _from_url(normalize_url(s), raw)
@@ -629,6 +639,229 @@ def resolve_hca(src: Source) -> Remote:
     return r
 
 
+# --- Synapse (Sage Bionetworks) ------------------------------------------------------------------
+
+SYNAPSE = "https://repo-prod.prod.sagebase.org/repo/v1"
+SYNAPSE_CONFIG = "~/.synapseConfig"
+SYNAPSE_JOBS = 8
+SYNAPSE_TOKEN_HELP = ("Make a personal access token with View and Download permissions on synapse.org "
+                      "(Account Settings > Personal Access Tokens) and put it in ~/.synapseConfig (chmod 600):\n"
+                      "  [authentication]\n  authtoken = <token>\n"
+                      "or in $SYNAPSE_AUTH_TOKEN; these are the places the synapse client looks.")
+
+
+class SynapseError(SourceError):
+    def __init__(self, code: int, reason: str):
+        super().__init__(f"Synapse answered {code}: {reason}")
+        self.code, self.reason = code, reason
+
+
+def synapse_token() -> tuple[str | None, str | None]:
+    """The Synapse access token and where it was found, or (None, None)."""
+    if os.environ.get("SYNAPSE_AUTH_TOKEN", "").strip():
+        return os.environ["SYNAPSE_AUTH_TOKEN"].strip(), "$SYNAPSE_AUTH_TOKEN"
+    import configparser
+    cp = configparser.ConfigParser(interpolation=None)
+    try:
+        cp.read(os.path.expanduser(SYNAPSE_CONFIG))
+    except configparser.Error:
+        return None, None
+    token = cp.get("authentication", "authtoken", fallback="").strip()
+    return (token, SYNAPSE_CONFIG) if token else (None, None)
+
+
+def _syn(path: str, body: dict | None = None, token: str | None = None) -> str:
+    """One Synapse REST call (a POST when there is a body), waiting while it says it is busy."""
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    data = None
+    if body is not None:
+        data, headers["Content-Type"] = json.dumps(body).encode(), "application/json"
+    url = SYNAPSE + path
+    for attempt in range(6):
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                return r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503) and attempt < 5:
+                wait = e.headers.get("Retry-After", "")
+                time.sleep(int(wait) if wait.isdigit() else 2 ** attempt)
+                continue
+            try:
+                reason = json.loads(e.read() or b"{}").get("reason") or e.reason
+            except ValueError:
+                reason = e.reason
+            raise SynapseError(e.code, reason)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise SourceError(f"cannot reach Synapse: {getattr(e, 'reason', e)}")
+    raise SynapseError(429, "still busy after several tries")
+
+
+def _syn_json(path: str, body: dict | None = None, token: str | None = None):
+    text = _syn(path, body, token)  # outside the try: SourceError is a ValueError too
+    try:
+        return json.loads(text)
+    except ValueError:
+        raise SourceError(f"Synapse returned something that isn't JSON for {path}")
+
+
+def _syn_path(syn_id: str, version) -> str:
+    return f"/entity/{syn_id}" + (f"/version/{version}" if version else "")
+
+
+def _syn_children(parent: str, token: str | None) -> list[dict]:
+    out, page = [], None
+    while True:
+        body = {"parentId": parent, "includeTypes": ["file", "folder"]}
+        if page:
+            body["nextPageToken"] = page
+        d = _syn_json("/entity/children", body, token)
+        out += d.get("page") or []
+        page = d.get("nextPageToken")
+        if not page:
+            return out
+
+
+def _syn_type(entity: dict) -> str:
+    return (entity.get("concreteType") or entity.get("type") or "").rsplit(".", 1)[-1]
+
+
+def _syn_url(syn_id: str, version, token: str | None):
+    """Synapse hands out pre-signed URLs that expire, so ask for one just before downloading."""
+    def resolve():
+        return _syn(_syn_path(syn_id, version) + "/file?redirect=false", token=token).strip()
+    return resolve
+
+
+class _Progress:
+    """A line on stderr now and then while a big Synapse project is read."""
+    def __init__(self, every: float = 10):
+        self.every, self.last = every, time.monotonic()
+
+    def say(self, msg: str) -> None:
+        if time.monotonic() - self.last >= self.every:
+            self.last = time.monotonic()
+            print(f"  Synapse: {msg}", file=sys.stderr, flush=True)
+
+
+def _syn_files(ent: dict, token: str | None, progress: _Progress | None = None) -> list[tuple[str, str, int | None]]:
+    """(folder inside the download, Synapse ID, version) of every file under an entity."""
+    kind = _syn_type(ent)
+    if kind == "FileEntity":
+        return [("", ent["id"], ent.get("versionNumber"))]
+    if kind == "Dataset":  # a fixed list of file versions, from anywhere in Synapse
+        return [("", x["entityId"], x.get("versionNumber")) for x in ent.get("items") or []]
+    if kind == "DatasetCollection":  # datasets, each in its own folder
+        out = []
+        for x in ent.get("items") or []:
+            sub = _syn_json(_syn_path(x["entityId"], x.get("versionNumber")), token=token)
+            out += [((sub.get("name") or sub["id"]) + "/" + rel, i, v) for rel, i, v in _syn_files(sub, token)]
+        return out
+    if kind in ("Project", "Folder"):  # read a level of folders at a time, several at once
+        from concurrent.futures import ThreadPoolExecutor
+        out, level, folders = [], [("", ent["id"])], 0
+        with ThreadPoolExecutor(SYNAPSE_JOBS) as pool:
+            while level:
+                below = []
+                for (rel, _), kids in zip(level, pool.map(lambda x: _syn_children(x[1], token), level)):
+                    for c in kids:
+                        if _syn_type(c) == "Folder":
+                            below.append((rel + c["name"] + "/", c["id"]))
+                        else:
+                            out.append((rel, c["id"], c.get("versionNumber")))
+                folders += len(level)
+                if progress:
+                    progress.say(f"{len(out):,} files in {folders:,} folders so far")
+                level = below
+        return out
+    raise SourceError(f"{ent.get('id')} is a Synapse {kind or 'entity'}, which has no files to download "
+                      "(stew downloads projects, folders, files and datasets; tables and views are not files)")
+
+
+def _syn_annotations(bundle: dict) -> dict[str, list[str]]:
+    ann = ((bundle.get("annotations") or {}).get("annotations")) or {}
+    return {k.lower(): [str(v) for v in (a.get("value") or [])] for k, a in ann.items()}
+
+
+def resolve_synapse(src: Source) -> Remote:
+    syn_id, _, version = src.accession.partition(".")
+    token, _ = synapse_token()
+    try:
+        ent = _syn_json(_syn_path(syn_id, version), token=token)
+    except SynapseError as e:
+        if e.code in (403, 404):
+            raise SourceError(f"Synapse has no entity {src.accession} that you can see"
+                              + ("" if token else " (private data needs a Synapse token)"))
+        if e.code == 401:
+            raise SourceError(f"Synapse refused the access token ({e.reason}). {SYNAPSE_TOKEN_HELP}")
+        raise
+    if _syn_type(ent) == "Link":
+        target = (ent.get("linksTo") or {})
+        ent = _syn_json(_syn_path(target["targetId"], target.get("targetVersionNumber")), token=token)
+    r = Remote(title=ent.get("name"), study=src.accession)
+    progress = _Progress()
+    entries = _syn_files(ent, token, progress)
+
+    # One call per file gives its name, size and md5, its annotations, and whether we may download it.
+    want = {"includeEntity": True, "includeFileHandles": True, "includeAnnotations": True,
+            "includeRestrictionInformation": True}
+
+    def bundle(entry):
+        rel, i, v = entry
+        b = _syn_json(_syn_path(i, v) + "/bundle2", want, token)
+        progress.say(f"read {next(done):,} of {len(entries):,} files")
+        return rel, i, v, b
+
+    def handle(b):  # none when we may not download it (also not listing preview images)
+        e = b.get("entity") or {}
+        return next((h for h in b.get("fileHandles") or [] if h.get("id") == e.get("dataFileHandleId")), None)
+
+    page = f"https://www.synapse.org/Synapse:{syn_id}"
+    no_token = ("Synapse lets only signed-in users download data that isn't marked open. " + SYNAPSE_TOKEN_HELP)
+    import itertools
+    from concurrent.futures import ThreadPoolExecutor
+    done = itertools.count(1)
+    bundles = [bundle(entries[0])] if entries else []
+    if bundles and not token and handle(bundles[0][3]) is None:  # don't read thousands of files to say so
+        raise SourceError(f"{src.accession} needs a Synapse login to download. {no_token}")
+    with ThreadPoolExecutor(SYNAPSE_JOBS) as pool:
+        bundles += pool.map(bundle, entries[1:])
+    annotations: dict[str, list[str]] = {}
+    blocked, names = [], set()
+    for rel, i, v, b in bundles:
+        for k, vals in _syn_annotations(b).items():
+            annotations.setdefault(k, []).extend(vals)
+        e = b.get("entity") or {}
+        handle_ = handle(b)
+        if handle_ is None:
+            blocked.append(i)
+            continue
+        name = rel + (handle_.get("fileName") or e.get("name") or i)
+        if name in names:  # two entities with the same file name in one folder
+            stem, dot, ext = name.rpartition(".")
+            name = f"{stem}-{i}.{ext}" if dot and "/" not in ext else f"{name}-{i}"
+        names.add(name)
+        v = v or e.get("versionNumber")
+        size = handle_.get("contentSize")
+        r.files.append(RemoteFile(name, f"{SYNAPSE}{_syn_path(i, v)}/file", int(size) if size is not None else None,
+                                  handle_.get("contentMd5") or None, resolve=_syn_url(i, v, token)))
+    r.species = _one(vocab.species(x) for k in ("species", "organism") for x in annotations.get(k, []))
+    r.organ = _organ(annotations.get("organ", []) + annotations.get("tissue", []))
+    assays = annotations.get("assay", [])
+    r.modalities = _strategy_modalities(assays) | {m for a in assays for m in vocab.infer_modalities(vocab.tokens(a))}
+    if blocked:
+        why = (f"Accept the data's terms of use on {page} with your Synapse account (some data needs an approved "
+               "request), then run this again." if token else no_token)
+        if not r.files:
+            raise SourceError(f"you may not download any of the {len(blocked)} file(s) of {src.accession} yet. {why}")
+        r.note = f"{len(blocked)} of {len(entries)} files can't be downloaded yet and are left out. {why}"
+    elif not r.files:
+        r.note = f"{src.accession} has no files."
+    return r
+
+
 # --- plain URLs -------------------------------------------------------------------------------------
 
 def resolve_url(src: Source) -> Remote:
@@ -644,7 +877,8 @@ def resolve_url(src: Source) -> Remote:
 
 
 RESOLVERS = {"geo": resolve_geo, "sra": resolve_sra, "cellxgene": resolve_cellxgene, "biostudies": resolve_biostudies,
-             "figshare": resolve_figshare, "zenodo": resolve_zenodo, "hca": resolve_hca, "url": resolve_url}
+             "figshare": resolve_figshare, "zenodo": resolve_zenodo, "hca": resolve_hca, "synapse": resolve_synapse,
+             "url": resolve_url}
 
 
 def resolve(src: Source) -> Remote:

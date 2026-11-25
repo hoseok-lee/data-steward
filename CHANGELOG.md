@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+- `stew download syn…` downloads from Synapse: every file of a project or folder
+  (subfolders kept), a single file, or the files of a dataset; `syn123.4` pins a
+  version, and synapse.org URLs work too. Files are md5-checked, and species, organ and
+  modalities are read from the files' annotations. A personal access token is read
+  from `~/.synapseConfig` or `$SYNAPSE_AUTH_TOKEN`, like the synapse client does; without
+  one, only open data downloads. Files whose terms of use you haven't accepted are left
+  out, with a note saying where to accept them.
 ## 0.7.1
 - `stew download <source> --missing` tops up a catalogued dataset with the remote files
   its folder lacks (e.g. ones left out with `--files`), into the same folder, and

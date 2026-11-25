@@ -220,6 +220,9 @@ def test_web_page_is_read_only_json(tree):
     ("https://data.humancellatlas.org/hca-bio-networks/lung/projects/74b6d569-3b11-42ef-b6b1-a0454522b4a0",
      "hca:74b6d569-3b11-42ef-b6b1-a0454522b4a0"),
     ("GSE274673:raw", "geo:GSE274673:raw"),
+    ("syn26223298", "synapse:syn26223298"), ("SYN123.4", "synapse:syn123.4"), ("synapse:syn5", "synapse:syn5"),
+    ("https://www.synapse.org/#!Synapse:syn26223298/wiki/603183", "synapse:syn26223298"),
+    ("https://www.synapse.org/Synapse:syn52118824.2/files/", "synapse:syn52118824.2"),
 ])
 def test_parse_more_sources(text, key):
     assert sources.parse(text).key == key
@@ -281,6 +284,103 @@ def test_geo_raw_reads_go_through_sra(monkeypatch):
     r = sources.resolve(sources.parse("GSE9", raw=True))
     assert [f.name for f in r.files] == ["SRR9.fastq.gz"]
     assert set(r.parents) == {"sra:PRJNA9", "sra:SRP9"}
+
+
+def synapse_api(monkeypatch, open_ids=None):
+    """A Synapse with a project (a file and a folder holding two files) and a dataset.
+    Files outside `open_ids` have unmet access requirements: no file handle."""
+    ents = {
+        "syn1": {"id": "syn1", "name": "Atlas", "concreteType": "org.sagebionetworks.repo.model.Project"},
+        "syn2": {"id": "syn2", "name": "raw data", "concreteType": "org.sagebionetworks.repo.model.Folder",
+                 "parentId": "syn1"},
+        "syn9": {"id": "syn9", "name": "Pick", "concreteType": "org.sagebionetworks.repo.model.table.Dataset",
+                 "items": [{"entityId": "syn4", "versionNumber": 1}]},
+        "syn7": {"id": "syn7", "name": "A view", "concreteType": "org.sagebionetworks.repo.model.table.EntityView"},
+    }
+    files = {"syn3": ("meta.csv", 10, "aa", "syn1"), "syn4": ("a.h5ad", 2000, "bb", "syn2"),
+             "syn5": ("a.h5ad", 3000, None, "syn2")}
+    for i, (name, size, md5, parent) in files.items():
+        ents[i] = {"id": i, "name": name, "concreteType": "org.sagebionetworks.repo.model.FileEntity",
+                   "versionNumber": 2, "dataFileHandleId": f"h{i}", "parentId": parent}
+    calls = []
+
+    def fake(path, body=None, token=None):
+        calls.append(path)
+        if path == "/entity/children":
+            kids = [e for e in ents.values() if e.get("parentId") == body["parentId"]]
+            return json.dumps({"page": [{"id": e["id"], "name": e["name"], "type": e["concreteType"],
+                                         "versionNumber": e.get("versionNumber", 1)} for e in kids]})
+        parts = path.split("/")
+        e = ents.get(parts[2])
+        if e is None:
+            raise sources.SynapseError(404, f"Resource: '{parts[2]}' does not exist")
+        if len(parts) > 4 and parts[3] == "version":
+            e = {**e, "versionNumber": int(parts[4])}
+        if path.endswith("/bundle2"):
+            name, size, md5, _ = files[e["id"]]
+            ok = open_ids is None or e["id"] in open_ids
+            handle = {"id": f"h{e['id']}", "fileName": name, "contentSize": size, "contentMd5": md5}
+            return json.dumps({"entity": e, "fileHandles": [{"id": "preview", "fileName": "p.png"}] + ([handle] if ok else []),
+                               "annotations": {"annotations": {"Species": {"value": ["Human"]},
+                                                               "tissue": {"value": ["lung"]},
+                                                               "assay": {"value": ["scrnaSeq"]}}}})
+        if path.endswith("/file?redirect=false"):
+            return f"https://s3.example/{e['id']}?signed=1"
+        return json.dumps(e)
+
+    monkeypatch.setattr(sources, "_syn", fake)
+    return calls
+
+
+def test_synapse_project_lists_files_in_folders(monkeypatch):
+    calls = synapse_api(monkeypatch)
+    r = sources.resolve(sources.parse("syn1"))
+    # two files called a.h5ad in one folder: the second keeps its Synapse ID
+    assert [(f.name, f.size, f.md5) for f in r.files] == [
+        ("meta.csv", 10, "aa"), ("raw data/a.h5ad", 2000, "bb"), ("raw data/a-syn5.h5ad", 3000, None)]
+    assert (r.title, r.study, r.species, r.organ, r.modalities) == ("Atlas", "syn1", "human", "lung", {"rna"})
+    f = next(f for f in r.files if f.name == "meta.csv")
+    assert f.resolve() == "https://s3.example/syn3?signed=1" and "/entity/syn3/version/2/file?redirect=false" in calls
+    assert r.note is None
+
+
+def test_synapse_dataset_file_and_versions(monkeypatch):
+    calls = synapse_api(monkeypatch)
+    r = sources.resolve(sources.parse("syn9"))
+    assert [(f.name, f.size) for f in r.files] == [("a.h5ad", 2000)]
+    assert "/entity/syn4/version/1/bundle2" in calls  # the dataset's pinned version
+    r = sources.resolve(sources.parse("syn3.1"))
+    assert [f.name for f in r.files] == ["meta.csv"] and "/entity/syn3/version/1/bundle2" in calls
+    with pytest.raises(sources.SourceError, match="tables and views"):
+        sources.resolve(sources.parse("syn7"))
+    with pytest.raises(sources.SourceError, match="no entity syn404"):
+        sources.resolve(sources.parse("syn404"))
+
+
+def test_synapse_files_behind_access_requirements(monkeypatch, tmp_path):
+    monkeypatch.delenv("SYNAPSE_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(sources, "SYNAPSE_CONFIG", str(tmp_path / "none"))
+    synapse_api(monkeypatch, open_ids={"syn3"})
+    r = sources.resolve(sources.parse("syn1"))
+    assert [f.name for f in r.files] == ["meta.csv"] and "2 of 3 files" in r.note and "token" in r.note
+    calls = synapse_api(monkeypatch, open_ids=set())
+    with pytest.raises(sources.SourceError, match="needs a Synapse login"):
+        sources.resolve(sources.parse("syn1"))
+    assert sum(c.endswith("/bundle2") for c in calls) == 1  # gave up after the first file
+    monkeypatch.setenv("SYNAPSE_AUTH_TOKEN", "t")
+    with pytest.raises(sources.SourceError, match="any of the 3 file.*terms of use"):
+        sources.resolve(sources.parse("syn1"))
+
+
+def test_synapse_token_places(monkeypatch, tmp_path):
+    cfg = tmp_path / ".synapseConfig"
+    monkeypatch.setattr(sources, "SYNAPSE_CONFIG", str(cfg))
+    monkeypatch.delenv("SYNAPSE_AUTH_TOKEN", raising=False)
+    assert sources.synapse_token() == (None, None)
+    cfg.write_text("[authentication]\nauthtoken = abc%def\n")
+    assert sources.synapse_token() == ("abc%def", str(cfg))
+    monkeypatch.setenv("SYNAPSE_AUTH_TOKEN", " env ")
+    assert sources.synapse_token() == ("env", "$SYNAPSE_AUTH_TOKEN")
 
 
 # --- downloads -----------------------------------------------------------------------------------------

@@ -87,7 +87,7 @@ A dataset can be named by its name, its numeric id, or its path.
 | `get <dataset> [--to DIR] [--as NAME]` | make a symlink to the dataset in your folder and record it |
 | `links [--all] [--released] [--prune]` | links handed out (yours by default); `--prune` releases links whose symlink was deleted by hand |
 | `release <link>` | delete a link made by `get` |
-| `download <source>` | download from GEO, SRA/ENA, CELLxGENE, ArrayExpress, HCA, figshare, Zenodo or a URL, unless it is already here; `--background` runs it in tmux (see below) |
+| `download <source>` | download from GEO, SRA/ENA, CELLxGENE, ArrayExpress, HCA, figshare, Zenodo, Synapse or a URL, unless it is already here; `--background` runs it in tmux (see below) |
 | `downloads` | downloads in progress, finished and failed |
 | `add <path>` (`scan`) | register a file, a folder stew recognises as one dataset, or every dataset found inside any other folder (scripts and loose files stay; nothing found = the folder as one); moved into the data folder with a symlink left behind. `--whole`, `--each`, `--to DIR`, `--in-place`, `--dry-run` |
 | `set <dataset> ...` | edit metadata: `--organ`, `--species`, `-m` (replace), `--add-modality`, `--rm-modality`, `--tag`, `--untag`, `--study`, `--source`, `--desc`, `--steward`, `--name` |
@@ -135,6 +135,7 @@ stew download hca:74b6d569-3b11-42ef-b6b1-a0454522b4a0        # add --raw for FA
 stew download figshare:5968960 --files metadata_droplet.csv
 stew download zenodo:5979761 --organ lung --tag tracking --background
 stew download zenodo:5979761 --missing    # add the record's files not yet in its folder
+stew download syn26223298 --dry-run      # a Synapse project or folder, with its subfolders
 stew download https://example.org/atlas.h5ad --name my-atlas --derived-from hlca-core
 stew download https://ftp.example.org/data/run1/   # a folder listing: the whole folder
 ```
@@ -147,6 +148,7 @@ stew download https://ftp.example.org/data/run1/   # a folder listing: the whole
 | CELLxGENE `cellxgene:<collection>` | one H5AD per dataset in the collection |
 | HCA `hca:<project>` | processed files (matrices, loom, h5ad); `--raw` for FASTQs; sha256-checked |
 | figshare, Zenodo | all files of the record, md5-checked |
+| Synapse `syn…` (`syn….N` for a version, or a synapse.org URL) | every file of a project or folder (subfolders kept), a file, or a dataset's files; md5-checked; needs a Synapse token (below) unless the data is open |
 | any URL | the one file; for a web server's folder listing ("Index of …"), every file below that folder, keeping its subfolders |
 
 Before fetching anything, `download` checks that the data isn't already here:
@@ -188,6 +190,21 @@ what is still missing, and resumes each part where it stopped; a `.part` from an
 older stew is resumed too. Servers without ranged requests, files of unknown size
 and signed URLs (HCA) use one connection. When a server answers "busy" (429/503),
 stew waits as long as it asks and uses fewer connections for that file.
+
+Synapse lets only signed-in users download most data. Make a personal access token
+with View and Download permissions (synapse.org, Account Settings > Personal Access
+Tokens) and put it where the synapse client looks, `~/.synapseConfig` (chmod 600):
+
+```ini
+[authentication]
+authtoken = <token>
+```
+
+or `$SYNAPSE_AUTH_TOKEN` (not seen by `--background` downloads, so use the file for
+those). Data with terms of use (e.g. the AD Knowledge Portal) also needs them accepted
+on synapse.org with that account first; stew says so, and leaves such files out when
+only some of them are locked. The token is sent only to Synapse, never to the file
+servers it points to.
 
 With `--background`, stew does the checks and asks its questions, then hands the
 download to a tmux session (`stew-dl-…`) and returns. `stew downloads` shows

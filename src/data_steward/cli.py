@@ -60,7 +60,7 @@ Use datasets:
   release     Remove a link made by `get`
 
 Bring in data:
-  download    Download from GEO, SRA, CELLxGENE, ArrayExpress, HCA, figshare, Zenodo or a URL,
+  download    Download from GEO, SRA, CELLxGENE, ArrayExpress, HCA, figshare, Zenodo, Synapse or a URL,
               unless it is already here (--background to run it in tmux)
   downloads   Downloads in progress, finished and failed
 
@@ -192,6 +192,8 @@ SOURCE can be:
   CELLxGENE collection      cellxgene:<id> or its cellxgene.cziscience.com URL
   Human Cell Atlas project  hca:<id> or its data.humancellatlas.org URL (--raw for FASTQs)
   figshare / Zenodo         figshare:123, zenodo:123, their DOIs or URLs
+  Synapse                   syn123 (a project, folder, file or dataset; syn123.4 for a version)
+                            or its synapse.org URL; needs a Synapse token unless the data is open
   anything else             an http(s)/ftp URL; a folder listing URL downloads the folder
 
 Before downloading anything, stew checks that the data is not already here:
@@ -2017,6 +2019,11 @@ def stew_command() -> list[str]:
 def start_background(a, cat: Catalog, src: sources.Source, c: Candidate, dest: Path) -> None:
     """Re-runs this download in a tmux session (or a detached process), after
     the checks and questions have been answered here."""
+    if src.kind == "synapse" and shutil.which("tmux") and sources.synapse_token()[1] == "$SYNAPSE_AUTH_TOKEN":
+        # Passing it on the command line would show it to everyone on the machine (ps, tmux).
+        raise UserError("a background download can't see $SYNAPSE_AUTH_TOKEN (a running tmux server doesn't pass "
+                        "it on). Put the token in ~/.synapseConfig instead (chmod 600):\n"
+                        "  [authentication]\n  authtoken = <token>\nor download without --background.")
     logs = logs_dir(cat)
     logs.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
